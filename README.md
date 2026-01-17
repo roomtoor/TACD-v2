@@ -1,4 +1,7 @@
 # TACD
+> **说明**  
+> 本项目的完整代码已开源并托管于 GitHub：  
+> https://github.com/roomtoor/TACD-v2
 
 ## 1. Datasets
 
