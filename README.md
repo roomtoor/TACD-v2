@@ -1,7 +1,10 @@
 # TACD
 > **说明**  
-> 本项目的完整代码已开源并托管于 GitHub：  
-> https://github.com/roomtoor/TACD-v2
+> 本项目代码已开源于 GitHub：  
+> https://github.com/roomtoor/TACD-v2  
+>  
+> 主实验对应的预训练模型权重已上传至 HuggingFace：  
+> https://huggingface.co/javaccd/TACD-v2
 
 ## 1. Datasets
 
