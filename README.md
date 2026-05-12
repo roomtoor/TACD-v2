@@ -1,10 +1,10 @@
-# TACD
+# TASIL
 > **说明**  
 > 本项目代码已开源于 GitHub：  
-> https://github.com/roomtoor/TACD-v2  
+> https://github.com/roomtoor/TASIL  
 >  
 > 主实验对应的预训练模型权重已上传至 HuggingFace：  
-> https://huggingface.co/javaccd/TACD-v2
+> https://huggingface.co/javaccd/TASIL
 
 ## 1. Datasets
 
@@ -12,7 +12,7 @@
 请根据下方提供的 official link 自行下载数据集，并按如下方式放置。
 
 ```text
-TACD_v2/
+TASIL/
 ├── OfficeHomeDataset/
 │   ├── Art/
 │   ├── Clipart/
@@ -120,8 +120,7 @@ TACD_v2/
 
 - **模型权重（HuggingFace）**  
   
-  训练完成的模型权重已公开上传至 HuggingFace： https://huggingface.co/javaccd/TACD-v2
-
+  训练完成的模型权重已公开上传至 HuggingFace： https://huggingface.co/javaccd/TASIL
 - **可复现性说明**  
   
   所有主实验均固定随机种子并启用 deterministic 设置。  
