@@ -2,7 +2,6 @@
 from __future__ import annotations
 from typing import Dict, List, Tuple
 import torch
-import torch.nn.functional as F
 from torch.utils.data import DataLoader, ConcatDataset
 from tqdm import tqdm
 from pathlib import Path
@@ -49,9 +48,10 @@ def group_mean_losses(losses: torch.Tensor, group_ids: torch.Tensor, num_groups:
 
 def make_train_loader(cfg) -> Tuple[DataLoader, List[str]]:
     """
-    拼接多个源域，提供弱/强/反事实多视图。支持 OfficeHome / TerraIncognita。
+    拼接源域数据并提供弱/强/特征空间 appearance 多视图。
+    支持 OfficeHome / TerraIncognita / DomainNet / VLCS。
     返回:
-      - train_loader: dict batch (x_w/x_s[/x_cf]/y/domain/path)
+      - train_loader: dict batch (x_w/x_s/x_base/y/domain/path)
       - class_names: 全域统一类名列表（用于 val / 文本模板 / num_classes 对齐）
     """
     train_sets = []
@@ -70,7 +70,7 @@ def make_train_loader(cfg) -> Tuple[DataLoader, List[str]]:
                     root=cfg.dataset_root,
                     domain=d,
                     img_size=cfg.img_size,
-                    return_counterfactual=True,
+                    return_appearance=True,
                     class_names=class_names,
                 )
             )
@@ -87,7 +87,37 @@ def make_train_loader(cfg) -> Tuple[DataLoader, List[str]]:
                     root=cfg.dataset_root,
                     domain=d,
                     img_size=cfg.img_size,
-                    return_counterfactual=True,
+                    return_appearance=True,
+                    class_names=class_names,
+                )
+            )
+
+    elif dataset_name in ["domainnet", "domain-net", "dn"]:
+        from data import DomainNetMultiView, scan_domainnet_classes
+
+        class_names = scan_domainnet_classes(cfg.dataset_root)
+        for d in cfg.source_domains:
+            train_sets.append(
+                DomainNetMultiView(
+                    root=cfg.dataset_root,
+                    domain=d,
+                    img_size=cfg.img_size,
+                    return_appearance=True,
+                    class_names=class_names,
+                )
+            )
+
+    elif dataset_name in ["vlcs"]:
+        from data import VLCSMultiView, scan_vlcs_classes
+
+        class_names = scan_vlcs_classes(cfg.dataset_root)
+        for d in cfg.source_domains:
+            train_sets.append(
+                VLCSMultiView(
+                    root=cfg.dataset_root,
+                    domain=d,
+                    img_size=cfg.img_size,
+                    return_appearance=True,
                     class_names=class_names,
                 )
             )
@@ -164,6 +194,46 @@ def make_val_loaders(cfg, class_names: List[str]) -> Dict[str, DataLoader]:
             )
         return loaders
 
+    elif dataset_name in ["domainnet", "domain-net", "dn"]:
+        from data import DomainNetDataset
+
+        for d in cfg.target_domains:
+            ds = DomainNetDataset(
+                root=cfg.dataset_root,
+                domain=d,
+                transform=t_weak,
+                class_names=class_names,
+                return_pil=False,
+            )
+            loaders[d] = DataLoader(
+                ds,
+                batch_size=cfg.batch_size,
+                shuffle=False,
+                num_workers=cfg.num_workers,
+                pin_memory=True,
+            )
+        return loaders
+
+    elif dataset_name in ["vlcs"]:
+        from data import VLCSDataset
+
+        for d in cfg.target_domains:
+            ds = VLCSDataset(
+                root=cfg.dataset_root,
+                domain=d,
+                transform=t_weak,
+                class_names=class_names,
+                return_pil=False,
+            )
+            loaders[d] = DataLoader(
+                ds,
+                batch_size=cfg.batch_size,
+                shuffle=False,
+                num_workers=cfg.num_workers,
+                pin_memory=True,
+            )
+        return loaders
+
     else:
         raise ValueError(f"Unknown cfg.dataset_name={dataset_name}")
 
@@ -201,6 +271,7 @@ def train_one_epoch(
     loss_meter = AverageMeter("loss")
     cls_meter  = AverageMeter("cls")
     cons_meter = AverageMeter("cons")
+    ap_meter   = AverageMeter("appearance")
     dro_meter  = AverageMeter("dro")
 
     pbar = tqdm(train_loader, desc=f"Train epoch {epoch}")
@@ -209,8 +280,6 @@ def train_one_epoch(
         x_w = batch["x_w"].to(device, non_blocking=True)
         x_s = batch["x_s"].to(device, non_blocking=True)
         y   = batch["y"].to(device, non_blocking=True)
-        dom = batch["domain"].to(device, non_blocking=True)
-
         logits_w = model(x_w)           # f_clean -> logits
         logits_s = model(x_s)
 
@@ -221,22 +290,24 @@ def train_one_epoch(
         loss_cls  = cosine_ce(logits_w, y)
         loss_cons = symmetric_kl(logits_w, logits_s)
 
-        # 组损失（各域）
-        with torch.no_grad():
-            per_ex_loss = F.cross_entropy(logits_w, y, reduction="none").clamp_min(0.0)  # [B]
-        dom_group_losses = group_mean_losses(per_ex_loss, dom, len(cfg.source_domains))  # [G_dom]
+        if "x_base" not in batch:
+            raise RuntimeError(
+                "[train_one_epoch] x_base is required for feature-space appearance augmentation."
+            )
+        x_base = batch["x_base"].to(device, non_blocking=True)
+        logits_ap = model.forward_appearance(x_base)
+        if nan_guard:
+            _check_finite(logits_ap, "logits_ap")
 
-        # 反事实组
-        group_losses_list = [dom_group_losses]
-        if "x_cf" in batch:
-            x_cf = batch["x_cf"].to(device, non_blocking=True)
-            logits_cf = model(x_cf)
-            loss_cf = cosine_ce(logits_cf, y)
-            group_losses_list.append(loss_cf.detach().unsqueeze(0))  # [1]
-
-        group_losses = torch.cat(group_losses_list, dim=0)  # [G_dom + 1]
+        # GroupDRO 的两个组与论文一致：弱视图和 appearance 视图。
+        # update() 只使用 detach 后的数值更新 q；forward() 必须接收未 detach
+        # 的损失，才能让加权组损失对模型参数产生梯度。
+        loss_ap = cosine_ce(logits_ap, y)
+        group_losses = torch.stack([loss_cls, loss_ap], dim=0)  # [L_w, L_ap]
         dro.update(group_losses.detach())
         loss_dro = dro(group_losses)
+        if not loss_dro.requires_grad:
+            raise RuntimeError("[GroupDRO] loss_dro is detached from the computation graph.")
 
         loss = cfg.lambda_cls * loss_cls + cfg.lambda_cons * loss_cons + cfg.lambda_group * loss_dro
 
@@ -248,6 +319,7 @@ def train_one_epoch(
         loss_meter.update(loss.item(), y.size(0))
         cls_meter.update(loss_cls.item(), y.size(0))
         cons_meter.update(loss_cons.item(), y.size(0))
+        ap_meter.update(loss_ap.item(), y.size(0))
         dro_meter.update(loss_dro.item(), 1)
 
         if (it + 1) % cfg.print_interval == 0:
@@ -255,12 +327,15 @@ def train_one_epoch(
                 "loss": f"{loss_meter.avg:.4f}",
                 "cls": f"{cls_meter.avg:.4f}",
                 "cons": f"{cons_meter.avg:.4f}",
+                "ap": f"{ap_meter.avg:.4f}",
                 "dro": f"{dro_meter.avg:.4f}",
             })
 
     logger.write(
         f"[Train][{epoch}] loss={loss_meter.avg:.4f} | "
-        f"cls={cls_meter.avg:.4f} | cons={cons_meter.avg:.4f} | dro={dro_meter.avg:.4f}"
+        f"cls={cls_meter.avg:.4f} | cons={cons_meter.avg:.4f} | "
+        f"appearance={ap_meter.avg:.4f} | dro={dro_meter.avg:.4f} | "
+        f"q={dro.q.detach().cpu().tolist()}"
     )
 
 

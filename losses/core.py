@@ -20,7 +20,7 @@ def symmetric_kl(p_logits: torch.Tensor, q_logits: torch.Tensor) -> torch.Tensor
     p_prob = p_log.exp()
     q_prob = q_log.exp()
 
-    # 双向 KL
+    # 与论文定义一致：L_cons = 1/2 [KL(p||q) + KL(q||p)]。
     kl1 = F.kl_div(p_log, q_prob, reduction="batchmean")
     kl2 = F.kl_div(q_log, p_prob, reduction="batchmean")
-    return kl1 + kl2
+    return 0.5 * (kl1 + kl2)

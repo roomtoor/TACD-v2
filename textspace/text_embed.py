@@ -6,6 +6,27 @@ from textspace.style_bank import DEFAULT_STYLE_WORDS
 from typing import List, Optional
 
 @torch.no_grad()
+def build_style_embeddings(
+    clip_model,
+    device: str = "cuda",
+    k: Optional[int] = None,
+    extra_words: Optional[List[str]] = None
+) -> torch.Tensor:
+    """编码逐个风格描述符，返回 L2-normalized 特征 [K, d]。"""
+    styles = list(DEFAULT_STYLE_WORDS)
+    if extra_words:
+        styles.extend(extra_words)
+    if k is not None:
+        styles = styles[:k]
+    if not styles:
+        raise ValueError("At least one style descriptor is required.")
+
+    tokens = torch.cat([clip.tokenize(s).to(device) for s in styles], dim=0)
+    tfeat = clip_model.encode_text(tokens).float()
+    return F.normalize(tfeat, dim=-1)
+
+
+@torch.no_grad()
 def build_style_subspace(
     clip_model,
     device: str = "cuda",
@@ -17,7 +38,7 @@ def build_style_subspace(
     构建文本锚定的风格子空间 E_s ∈ R^{d×k}
     ------------------------------------------------
     Args:
-        clip_model : 已加载的 CLIP 模型（可来自 TACDv2.backbone.model）
+        clip_model : loaded CLIP model (for example, TASIL.backbone.model)
         device     : "cuda" or "cpu"
         k          : 使用前 k 个风格词
         use_qr     : 是否正交化列向量（推荐）
@@ -25,16 +46,9 @@ def build_style_subspace(
     Returns:
         E_s : torch.Tensor [d, k]
     """
-    styles = list(DEFAULT_STYLE_WORDS)
-    if extra_words:
-        styles.extend(extra_words)
-    if k:
-        styles = styles[:k]
-
-    # tokenize & encode
-    tokens = torch.cat([clip.tokenize(s).to(device) for s in styles], dim=0)
-    tfeat = clip_model.encode_text(tokens).float()   # [k, d]
-    tfeat = F.normalize(tfeat, dim=-1)               # 行向量单位化
+    tfeat = build_style_embeddings(
+        clip_model, device=device, k=k, extra_words=extra_words
+    )                                                # [k, d]
 
     # 转置成 [d, k]
     E = tfeat.t().contiguous()

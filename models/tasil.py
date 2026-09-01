@@ -14,9 +14,9 @@ def l2n(x: torch.Tensor, dim: int = -1, eps: float = 1e-6) -> torch.Tensor:
     return x / x.norm(dim=dim, keepdim=True).clamp_min(eps)
 
 
-class TACDv2(nn.Module):
+class TASIL(nn.Module):
     """
-    TACD-v2（稳健版）：
+    Text-Anchored Style Invariance Learning (TASIL).
       - 冻结 CLIP backbone
       - 语义投影头 P_sem
       - 文本锚定风格子空间剔除：f_clean = f − σ(α)·Proj_Q(f)，其中 Q 来自对 E_s 列正交化（QR）
@@ -57,6 +57,9 @@ class TACDv2(nn.Module):
         # 缓存正交基 Q 和 L2N 过的 T（作为 buffer，不反传）
         self.register_buffer("Q", torch.empty(D, 0))      # [D, r], r 可能小于 K
         self.register_buffer("T", torch.empty(0, D))      # [C, D]
+        # 每一行对应一个具体风格描述符；仅训练时构造 appearance view。
+        # 不写入 checkpoint，避免破坏旧权重的加载兼容性。
+        self.register_buffer("style_embeddings", torch.empty(0, D), persistent=False)
 
         # 支持构造时注入
         if E_s is not None:
@@ -84,6 +87,16 @@ class TACDv2(nn.Module):
         Q, _ = torch.linalg.qr(E_s, mode="reduced")  # 正交列空间
         self.Q = Q  # [D, r]
 
+    @torch.no_grad()
+    def set_style_embeddings(self, style_embeddings: torch.Tensor):
+        """缓存逐描述符的文本特征，输入形状为 [K, D]。"""
+        assert style_embeddings.dim() == 2 and style_embeddings.size(1) == self.backbone.out_dim, \
+            (f"style_embeddings should be [K,D] with D={self.backbone.out_dim}, "
+             f"got {tuple(style_embeddings.shape)}")
+        if style_embeddings.size(0) == 0:
+            raise ValueError("style_embeddings must contain at least one descriptor.")
+        self.style_embeddings = l2n(style_embeddings.to(self.device), dim=1)
+
     # --------- 公共方法：注入/替换类别文本锚 ----------
     @torch.no_grad()
     def set_class_texts(self, T: torch.Tensor):
@@ -105,58 +118,101 @@ class TACDv2(nn.Module):
         return self.backbone.encode_text(token_ids).float()
 
     # ------------------- 前向（分步） -------------------
-    def forward_features(self, images: torch.Tensor) -> Dict[str, torch.Tensor]:
-        """
-        返回中间特征，便于日志/可视化：
-          f0:   冻结 CLIP img 特征（no grad）
-          f:    projector 之后（可学习）
-          f_clean: 风格剔除后
-        """
-        f0 = self.encode_image(images)                      # [B, D], no grad
-        f  = self.projector(f0)                             # [B, D]
+    def _project_and_suppress(self, clip_features: torch.Tensor):
+        """共享的 projection -> style suppression 路径。"""
+        f = self.projector(clip_features)
         if self.Q.numel() == 0:
+            f_proj = torch.zeros_like(f)
             f_clean = f
         else:
-            # 正交投影：Proj_Q(f) = (f @ Q) @ Q^T
-            f_proj  = (f @ self.Q) @ self.Q.transpose(0, 1)
-            a       = torch.sigmoid(self.alpha)             # (0,1)
+            f_proj = (f @ self.Q) @ self.Q.transpose(0, 1)
+            a = torch.sigmoid(self.alpha)
             f_clean = f - a * f_proj
-        return {"f0": f0, "f": f, "f_clean": f_clean}
+        return f, f_proj, f_clean
+
+    def _classify_clean(self, f_clean: torch.Tensor) -> torch.Tensor:
+        assert self.T.numel() > 0, "Class text embeddings T is not set."
+        feats_n = l2n(f_clean, dim=1)
+        if not torch.isfinite(f_clean).all():
+            raise RuntimeError("[TASIL] feats (f_clean) non-finite!")
+        if not torch.isfinite(self.T).all():
+            raise RuntimeError("[TASIL] class anchors T non-finite!")
+        logits = self.classifier(feats_n, self.T)
+        if not torch.isfinite(logits).all():
+            raise RuntimeError("[TASIL] logits contains non-finite values.")
+        return logits
+
+    def forward_features(self, images: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """标准图像视图：CLIP 编码、归一化、共享投影与风格抑制。"""
+        f0 = self.encode_image(images)                      # [B, D], no grad
+        v = l2n(f0, dim=1)
+        f, f_proj, f_clean = self._project_and_suppress(v)
+        return {"f0": f0, "v": v, "f": f, "f_proj": f_proj, "f_clean": f_clean}
+
+    def forward_appearance_features(
+        self,
+        images: torch.Tensor,
+        style_indices: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
+        """
+        构造论文中的 appearance view：
+          v_ap = Norm(Norm(CLIP_image(x)) + e_j), j ~ Uniform({1,...,K})
+        随后进入与其他视图完全共享的 projection 和 style suppression。
+        """
+        if self.style_embeddings.numel() == 0:
+            raise RuntimeError("Style embeddings are not set for appearance augmentation.")
+
+        f0 = self.encode_image(images)                      # 原图 CLIP 特征
+        v_img = l2n(f0, dim=1)
+        batch_size = v_img.size(0)
+        num_styles = self.style_embeddings.size(0)
+
+        if style_indices is None:
+            style_indices = torch.randint(
+                low=0, high=num_styles, size=(batch_size,), device=v_img.device
+            )
+        else:
+            style_indices = style_indices.to(v_img.device, dtype=torch.long)
+            if style_indices.shape != (batch_size,):
+                raise ValueError(
+                    f"style_indices should have shape ({batch_size},), "
+                    f"got {tuple(style_indices.shape)}"
+                )
+            if style_indices.min() < 0 or style_indices.max() >= num_styles:
+                raise ValueError("style_indices contains an out-of-range descriptor index.")
+
+        e_j = self.style_embeddings.index_select(0, style_indices)
+        v_ap = l2n(v_img + e_j, dim=1)
+        f, f_proj, f_clean = self._project_and_suppress(v_ap)
+        return {
+            "f0": f0,
+            "v_img": v_img,
+            "style_indices": style_indices,
+            "e_style": e_j,
+            "v_ap": v_ap,
+            "f": f,
+            "f_proj": f_proj,
+            "f_clean": f_clean,
+        }
 
     # ------------------- 标准前向（输出 logits） -------------------
     def forward(self, images: torch.Tensor) -> torch.Tensor:
-        feats = self.forward_features(images)["f_clean"]    # [B, D]
-        assert self.T.numel() > 0, "Class text embeddings T is not set."
+        return self._classify_clean(self.forward_features(images)["f_clean"])
 
-        # 统一在这里 L2N，避免 0/0 或极端范数带来的数值不稳
-        feats_n = l2n(feats, dim=1)                         # [B, D]
-        T_n     = self.T                                     # 已经是 L2N 过的 [C, D]
-
-        # ========== 关键断言：告诉我们究竟是谁先 NaN ==========
-        if not torch.isfinite(feats).all():
-            raise RuntimeError("[TACDv2] feats (f_clean) non-finite!")
-        if not torch.isfinite(self.T).all():
-            raise RuntimeError("[TACDv2] class anchors T non-finite!")
-
-        # 如果外部分类器内部也做 L2N，不会有坏处；这里再传入归一化后的张量
-        logits = self.classifier(feats_n, T_n)              # [B, C]
-        # 额外的安全检查（训练时开销很小）
-        if not torch.isfinite(logits).all():
-            raise RuntimeError("[TACDv2] logits contains non-finite values.")
-        return logits
+    def forward_appearance(
+        self,
+        images: torch.Tensor,
+        style_indices: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        feats = self.forward_appearance_features(images, style_indices=style_indices)
+        return self._classify_clean(feats["f_clean"])
 
     # ------------------- 调试接口：返回中间量 -------------------
     @torch.no_grad()
     def debug_forward(self, images: torch.Tensor) -> Dict[str, torch.Tensor]:
         f0 = self.encode_image(images).float()
-        f  = self.projector(f0).float()
-        if self.Q.numel() == 0:
-            f_proj = torch.zeros_like(f)
-            f_clean = f
-        else:
-            f_proj  = (f @ self.Q) @ self.Q.transpose(0, 1)
-            a       = torch.sigmoid(self.alpha)
-            f_clean = f - a * f_proj
+        v = l2n(f0, dim=1)
+        f, f_proj, f_clean = self._project_and_suppress(v)
 
         feats_n = l2n(f_clean, dim=1)
         T_n     = self.T
@@ -166,6 +222,6 @@ class TACDv2(nn.Module):
             logits = torch.zeros(f.size(0), 1, device=f.device)
 
         return {
-            "f0": f0, "f": f, "f_proj": f_proj, "f_clean": f_clean,
+            "f0": f0, "v": v, "f": f, "f_proj": f_proj, "f_clean": f_clean,
             "feats_n": feats_n, "Q": self.Q, "T": self.T, "logits_unit_tau": logits
         }

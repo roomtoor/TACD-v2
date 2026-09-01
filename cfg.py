@@ -2,7 +2,7 @@
 """
 全局配置文件（Config）
 --------------------
-集中管理 TACD-v2 的超参数、路径、模型结构和实验选项。
+Central configuration for TASIL experiments.
 """
 
 from dataclasses import dataclass, asdict, field
@@ -12,12 +12,12 @@ from typing import List, Optional, Dict
 class TrainConfig:
     # ====== 基础路径 ======
     dataset_root: str = "./OfficeHomeDataset"      # Office-Home 根目录
-    exp_name: str = "TACDv2_SSDG_GroupDRO"
+    exp_name: str = "TASIL_SSDG_GroupDRO"
     log_dir: str = "./logs"
     ckpt_dir: str = "./checkpoints"
 
     # ====== 数据相关 ======
-    dataset_name: str = "terraincognita"   # ["officehome", "terraincognita"]
+    dataset_name: str = "officehome"
     img_size: int = 224
     batch_size: int = 4
     num_workers: int = 8
@@ -38,7 +38,9 @@ class TrainConfig:
     lambda_cls: float = 1.0     # 主分类
     lambda_cons: float = 0.3    # KL 一致性
     lambda_group: float = 0.3   # GroupDRO 组稳健性
-    alpha_style_remove: float =-30  # 风格剔除强度 f_clean = f - αE_s(E_s^T f)，带有sigmoid
+    # 可学习 raw 参数 a 的初值；有效抑制系数 alpha_eff = sigmoid(a)。
+    # 主实验从 a=0（alpha_eff=0.5）开始学习。
+    alpha_style_remove: float = 0.0
 
     # ====== 优化器与训练 ======
     lr: float = 8e-5

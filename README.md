@@ -1,128 +1,145 @@
 # TASIL
-> **说明**  
-> 本项目代码已开源于 GitHub：  
-> https://github.com/roomtoor/TASIL  
->  
-> 主实验对应的预训练模型权重已上传至 HuggingFace：  
-> https://huggingface.co/javaccd/TASIL
 
-## 1. Datasets
+Official research implementation of **Text-Anchored Style Invariance Learning for Single-Source Domain Generalization**.
 
-由于项目体积限制，本项目仓库中不包含数据集文件。
-请根据下方提供的 official link 自行下载数据集，并按如下方式放置。
+TASIL constructs a style subspace from textual style descriptors encoded by a frozen CLIP model, suppresses style-aligned components in visual representations, and trains with weak, strong, and text-guided appearance feature views. The implementation follows a strict single-source domain generalization (SDG) protocol: only one labeled source domain is used for training, and held-out target domains are used only for final evaluation.
 
-```text
-TASIL/
-├── OfficeHomeDataset/
-│   ├── Art/
-│   ├── Clipart/
-│   ├── Product/
-│   └── Real World/
-└── TerraIncognitaDataset/
-    └── terra_incognita/
-        ├── location_38/
-        ├── location_43/
-        ├── location_46/
-        ├── location_100/
-        └── ...
+## Release scope
+
+This repository contains the main TASIL method, dataset loaders, training code, and evaluation code used for the paper's principal experiments. It intentionally excludes local datasets, checkpoints, logs, virtual environments, and auxiliary scripts for baselines or figure generation.
+
+The reported paper experiments use Office-Home and TerraIncognita. Loaders for DomainNet and VLCS are also included, but results for those datasets are not claimed in the paper.
+
+## Environment
+
+The reference environment uses Python 3.9, PyTorch 2.4.1, and torchvision 0.19.1. Create a clean environment instead of reusing a copied virtual environment:
+
+```bash
+conda create -n tasil python=3.9 -y
+conda activate tasil
+pip install -r requirements.txt
 ```
+
+Install a PyTorch build compatible with your CUDA driver if the default wheel is unsuitable for your machine. The first run may download the frozen CLIP ViT-B/16 weights.
+
+## Datasets
+
+Datasets are not redistributed. Download each dataset from its official source and arrange it as follows.
 
 ### Office-Home
 
-- **Dataset name**: Office-Home
+Download: [Office-Home dataset](https://www.hemanthdv.org/OfficeHome-Dataset/)
 
-- **Official link**: https://www.hemanthdv.org/OfficeHome-Dataset/
+```text
+OfficeHomeDataset/
+├── Art/<class_name>/*
+├── Clipart/<class_name>/*
+├── Product/<class_name>/*
+└── Real World/<class_name>/*
+```
 
-- **Expected directory structure**:
+### TerraIncognita
 
-    ```text
-    OfficeHomeDataset/
-    ├── Art/
-    │   ├── class_1/
-    │   │   └── *.jpg
-    │   ├── class_2/
-    │   │   └── *.jpg
-    │   └── ...
-    ├── Clipart/
-    ├── Product/
-    └── Real World/
-    ```
+Download and preprocessing reference: [DomainBed](https://github.com/facebookresearch/DomainBed)
 
-### TerraIncognita (DomainBed setting)
+```text
+TerraIncognitaDataset/
+└── terra_incognita/
+    ├── location_38/<class_name>/*
+    ├── location_43/<class_name>/*
+    ├── location_46/<class_name>/*
+    └── location_100/<class_name>/*
+```
 
-- **Dataset name**: TerraIncognita
+The loaders form one consistent label mapping across all domains. Directory names, spaces, and capitalization must match the structures above.
 
-- **Official link**: https://github.com/facebookresearch/DomainBed
+## Training
 
-- **Expected directory structure**:
+The paper reports three runs with seeds `3`, `5201314`, and `30319`. Training uses one source domain for 30 epochs and saves the fixed final-epoch checkpoint. Target-domain samples are not loaded during training or model selection.
 
-    ```text
-    TerraIncognitaDataset/
-    └── terra_incognita/
-        ├── location_38/
-        ├── location_43/
-        ├── location_46/
-        ├── location_100/
-        └── ...
-    ```
+Office-Home example:
 
-路径大小写与空格需与上述结构保持一致。
+```bash
+python run_train.py \
+  --dataset officehome \
+  --root ./OfficeHomeDataset \
+  --source "Real World" \
+  --seed 3 \
+  --epochs 30 \
+  --nan_guard
+```
 
-## 2. Environment
+TerraIncognita example:
 
-- 本项目的 Python 依赖已整理在 `requirements.txt` 中。
-- 已在全新环境中通过 `pip install -r requirements.txt` 验证可正常运行。
+```bash
+python run_train.py \
+  --dataset terraincognita \
+  --root ./TerraIncognitaDataset/terra_incognita \
+  --source location_46 \
+  --seed 3 \
+  --epochs 30 \
+  --nan_guard
+```
 
-> PyTorch 请根据本地 CUDA / GPU 驱动版本自行安装兼容版本，其余依赖可直接通过 `requirements.txt` 安装。
+Repeat each experiment for every source domain and each reported seed. Checkpoints are written to `checkpoints/`; logs are written to `logs/`.
 
-## 3. Training
+## Evaluation
 
-- **随机种子与确定性设置**：训练过程中固定随机种子（seed=3），并启用 deterministic 选项以保证结果可复现。
+Evaluate one checkpoint on every held-out domain:
 
-- **Office-Home 主实验训练命令（示例）**：
+```bash
+python evaluate.py \
+  --dataset officehome \
+  --root ./OfficeHomeDataset \
+  --source Art \
+  --seed 3 \
+  --ckpt ./checkpoints/TASIL_SSDG_GroupDRO_SSDG_officehome_Art_seed3_ep30.pth
+```
 
-      python run_train.py \
-        --dataset officehome \
-        --root ./OfficeHomeDataset \
-        --source "Real World" \
-        --epochs 30 \
-        --nan_guard
+```bash
+python evaluate.py \
+  --dataset terraincognita \
+  --root ./TerraIncognitaDataset/terra_incognita \
+  --source location_46 \
+  --seed 3 \
+  --ckpt ./checkpoints/TASIL_SSDG_GroupDRO_SSDG_terraincognita_location_46_seed3_ep30.pth
+```
 
-- **TerraIncognita（DomainBed setting）主实验训练命令**：
+The evaluation script prints per-target accuracy, mean accuracy, and worst-domain accuracy. Use `--per_class` to save per-class accuracy arrays.
 
-      python run_train.py \
-        --dataset terraincognita \
-        --root ./TerraIncognitaDataset/terra_incognita \
-        --source location_46 \
-        --epochs 30
+## Main results
 
-## 4. Evaluation
+Each source column reports the mean accuracy over the other three unseen domains. Values are percentages averaged over three seeds.
 
-- **Office-Home 测试命令（示例）**：
+| Dataset | Source 1 | Source 2 | Source 3 | Source 4 | Average |
+|---|---:|---:|---:|---:|---:|
+| Office-Home (Art / Clipart / Product / Real World) | 82.31 | 86.30 | 81.88 | 83.76 | 83.56 |
+| TerraIncognita (L38 / L43 / L46 / L100) | 33.17 | 41.42 | 44.08 | 33.57 | 38.06 |
 
-      python test_tacd_v2.py \
-        --dataset officehome \
-        --root ./OfficeHomeDataset \
-        --source Art \
-        --ckpt ./checkpoints/TACDv2_OfficeHome_3_SSDG_Art_ep25.pth
+## Repository structure
 
-- **TerraIncognita 测试命令（示例）**：
+```text
+.
+├── data/             # Dataset readers and augmentations
+├── losses/           # Consistency and GroupDRO objectives
+├── models/           # CLIP backbone, projection head, and TASIL model
+├── textspace/        # Class prompts and textual style subspace
+├── utils/            # Seeding, logging, schedules, and checkpoint helpers
+├── cfg.py            # Default experiment configuration
+├── run_train.py      # Single-source training entry point
+├── train_utils.py    # Training and loader utilities
+├── evaluate.py       # Held-out-domain evaluation entry point
+└── requirements.txt
+```
 
-      python test_tacd_v2.py \
-        --dataset terraincognita \
-        --root ./TerraIncognitaDataset/terra_incognita \
-        --source location_46 \
-        --ckpt ./checkpoints/TACDv2_SSDG_SSDG_terraincognita_location_46_ep10.pth
+## Reproducibility notes
 
-- **评测指标**：分类准确率（Accuracy），并报告各目标域结果、平均准确率（Mean）以及最差域准确率（Worst-domain）。
+- The CLIP image and text encoders remain frozen.
+- The default backbone is CLIP ViT-B/16.
+- The effective style-suppression coefficient is `sigmoid(alpha)`; the learnable raw parameter starts at `alpha = 0`, corresponding to an initial effective value of `0.5`.
+- The final training epoch is selected in advance; target-domain accuracy is not used for checkpoint selection.
+- Exact reproducibility can still depend on GPU hardware, CUDA, cuDNN, and third-party library behavior.
 
-## 5. Checkpoints and Logs
+## License
 
-- **模型权重（HuggingFace）**  
-  
-  训练完成的模型权重已公开上传至 HuggingFace： https://huggingface.co/javaccd/TASIL
-- **可复现性说明**  
-  
-  所有主实验均固定随机种子并启用 deterministic 设置。  
-  
-  通过本文档中提供的训练与测试命令，可复现实验结果。
+This project is released under the [MIT License](LICENSE).

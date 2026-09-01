@@ -1,29 +1,37 @@
+# Editors and local environments
 .idea/
 .vscode/
 .venv/
 env/
 venv/
 
+# Python cache and test artifacts
 __pycache__/
-*.pyc
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
+# Training artifacts
+checkpoints/
 logs/
 outputs/
 wandb/
-
-checkpoints/
 *.pth
 *.pt
+*.ckpt
 
+# Local datasets
 OfficeHomeDataset/
 TerraIncognitaDataset/
-data/
+DomainNetDataset/
+VLCSDataset/
 
+# Analysis artifacts
 tsne/
-dump_*.py
+*.npy
+*.npz
 
---ckpt
---source
-
+# OS metadata
 .DS_Store
 Thumbs.db

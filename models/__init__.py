@@ -2,11 +2,11 @@
 from .clip_backbone import CLIPBackbone
 from .projector import SemanticProjector
 from .classifier import CosineClassifier
-from .tacd_v2 import TACDv2
+from .tasil import TASIL
 
 __all__ = [
     "CLIPBackbone",
     "SemanticProjector",
     "CosineClassifier",
-    "TACDv2",
+    "TASIL",
 ]

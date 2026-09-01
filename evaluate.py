@@ -1,4 +1,4 @@
-# test_tacd_v2.py
+# evaluate.py
 from __future__ import annotations
 
 import os
@@ -11,7 +11,7 @@ from tqdm import tqdm
 from cfg import get_cfg
 from utils import set_seed, accuracy, Logger
 from data import get_weak_transform
-from models import TACDv2
+from models import TASIL
 from textspace import build_style_subspace, build_class_texts
 
 
@@ -40,6 +40,7 @@ def resolve_dataset(dataset_name: str):
       scan_classes: 扫全域交集类表
       to_prompts: 目录类名 -> prompt name
       all_domains: 域列表
+      normalize_domain: 命令行域名称 -> 规范域名称
     """
     ds = dataset_name.lower()
     if ds in ["officehome", "office-home", "oh"]:
@@ -47,7 +48,7 @@ def resolve_dataset(dataset_name: str):
         from data import scan_officehome_classes as scan_classes
         from data import officehome_prompt_names as to_prompts
         all_domains = ["Art", "Clipart", "Product", "Real World"]
-        return BaseDataset, scan_classes, to_prompts, all_domains
+        return BaseDataset, scan_classes, to_prompts, all_domains, lambda d: d
 
     if ds in ["terraincognita", "terra", "ti"]:
         from data import TerraIncognitaDataset as BaseDataset
@@ -58,7 +59,25 @@ def resolve_dataset(dataset_name: str):
             return [c.replace("_", " ").lower() for c in names]
 
         all_domains = ["location_38", "location_43", "location_46", "location_100"]
-        return BaseDataset, scan_classes, to_prompts, all_domains
+        return BaseDataset, scan_classes, to_prompts, all_domains, lambda d: d
+
+    if ds in ["domainnet", "domain-net", "dn"]:
+        from data import DomainNetDataset as BaseDataset
+        from data import scan_domainnet_classes as scan_classes
+        from data import domainnet_prompt_names as to_prompts
+        from data import normalize_domainnet_domain as normalize_domain
+
+        all_domains = ["clip", "info", "paint", "quick", "real", "sketch"]
+        return BaseDataset, scan_classes, to_prompts, all_domains, normalize_domain
+
+    if ds in ["vlcs"]:
+        from data import VLCSDataset as BaseDataset
+        from data import scan_vlcs_classes as scan_classes
+        from data import vlcs_prompt_names as to_prompts
+        from data import normalize_vlcs_domain as normalize_domain
+
+        all_domains = ["C", "L", "S", "V"]
+        return BaseDataset, scan_classes, to_prompts, all_domains, normalize_domain
 
     raise ValueError(f"Unsupported dataset={dataset_name}")
 
@@ -131,7 +150,7 @@ def eval_domain(model, loader, num_classes: int, per_class: bool = False):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dataset", type=str, default="officehome",
-                    choices=["officehome", "terraincognita"],
+                    choices=["officehome", "terraincognita", "domainnet", "vlcs"],
                     help="dataset name")
 
     ap.add_argument("--root", type=str, default=None, help="Dataset root (override cfg)")
@@ -143,6 +162,7 @@ def main():
                     help='显式指定评测域（优先级高于 --source）')
 
     ap.add_argument("--per_class", action="store_true", help="输出每类准确率并保存为 .npy")
+    ap.add_argument("--seed", type=int, default=None, help="training/evaluation seed")
     args = ap.parse_args()
 
     # ---- cfg & env ----
@@ -150,16 +170,21 @@ def main():
     if args.root:
         cfg_over["dataset_root"] = args.root
     cfg_over["dataset_name"] = args.dataset.lower()
+    if args.seed is not None:
+        cfg_over["seed"] = args.seed
     cfg = get_cfg(cfg_over)
 
     os.makedirs(cfg.log_dir, exist_ok=True)
-    logger = Logger(cfg.log_dir, cfg.exp_name + f"_TEST_{args.dataset.lower()}")
+    logger = Logger(
+        cfg.log_dir,
+        cfg.exp_name + f"_TEST_{args.dataset.lower()}_seed{cfg.seed}",
+    )
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     set_seed(cfg.seed, cfg.deterministic)
 
     # ---- dataset resolver ----
-    BaseDataset, scan_classes, to_prompts, ALL_DOMAINS = resolve_dataset(args.dataset)
+    BaseDataset, scan_classes, to_prompts, ALL_DOMAINS, normalize_domain = resolve_dataset(args.dataset)
 
     # ---- classes & text anchors ----
     class_names = scan_classes(cfg.dataset_root)      # 全域交集类表
@@ -167,7 +192,7 @@ def main():
     num_classes = len(class_names)
 
     # ---- build model (same as train) ----
-    model = TACDv2(
+    model = TASIL(
         clip_name=cfg.clip_backbone,
         device=device,
         projector_mlp=getattr(cfg, "projector_mlp", False),
@@ -207,9 +232,12 @@ def main():
 
     # ---- decide eval domains ----
     if args.domains:
-        domains = args.domains
+        domains = [normalize_domain(d) for d in args.domains]
     elif args.source:
-        domains = [d for d in ALL_DOMAINS if d != args.source]
+        source_domain = normalize_domain(args.source)
+        if source_domain not in ALL_DOMAINS:
+            raise ValueError(f"Unknown source domain {args.source}; expected one of {ALL_DOMAINS}")
+        domains = [d for d in ALL_DOMAINS if d != source_domain]
     else:
         domains = ALL_DOMAINS
 
