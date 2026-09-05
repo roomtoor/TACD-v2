@@ -32,7 +32,7 @@ class TrainConfig:
     freeze_clip: bool = True
     projector_dim: int = 512                        # 语义空间维度
     use_lora: bool = False                          
-    text_anchor_topk: Optional[int] = 30            # 选取前多少风格词构建 E_s
+    text_anchor_topk: Optional[int] = 29            # 默认使用论文中的完整 Mixed-29 风格词库
 
     # ====== 损失系数 ======
     lambda_cls: float = 1.0     # 主分类

@@ -10,7 +10,7 @@ from tqdm import tqdm
 
 from cfg import get_cfg
 from utils import set_seed, accuracy, Logger
-from data import get_weak_transform
+from data import get_base_transform
 from models import TASIL
 from textspace import build_style_subspace, build_class_texts
 
@@ -83,11 +83,13 @@ def resolve_dataset(dataset_name: str):
 
 
 def make_loader(BaseDataset, root, domain, class_names, img_size, batch_size, workers):
-    t_weak = get_weak_transform(img_size)
+    # Evaluation must be deterministic. Keep RandomHorizontalFlip and
+    # ColorJitter in the training-only weak transform, but do not use them here.
+    t_test = get_base_transform(img_size)
     ds = BaseDataset(
         root=root,
         domain=domain,
-        transform=t_weak,
+        transform=t_test,
         class_names=class_names,   # 关键：统一 label space
         return_pil=False
     )
