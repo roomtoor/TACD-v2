@@ -3,7 +3,6 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 import clip  # pip install git+https://github.com/openai/CLIP.git
-from typing import Tuple
 
 class CLIPBackbone(nn.Module):
     """
@@ -26,7 +25,7 @@ class CLIPBackbone(nn.Module):
         # 预处理里通常会 resize 到 224；保留这个信息方便 data pipeline
         self.image_size: int = 224
 
-        # 提供 mean/std（和 CLIP 预处理一致），便于你自定义 transform
+        # CLIP normalization statistics for the dataset transforms.
         self.pixel_mean = (0.48145466, 0.4578275, 0.40821073)
         self.pixel_std  = (0.26862954, 0.26130258, 0.27577711)
 

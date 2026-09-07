@@ -10,10 +10,11 @@ def build_style_embeddings(
     clip_model,
     device: str = "cuda",
     k: Optional[int] = None,
-    extra_words: Optional[List[str]] = None
+    extra_words: Optional[List[str]] = None,
+    style_words: Optional[List[str]] = None,
 ) -> torch.Tensor:
     """编码逐个风格描述符，返回 L2-normalized 特征 [K, d]。"""
-    styles = list(DEFAULT_STYLE_WORDS)
+    styles = list(DEFAULT_STYLE_WORDS if style_words is None else style_words)
     if extra_words:
         styles.extend(extra_words)
     if k is not None:
@@ -32,7 +33,8 @@ def build_style_subspace(
     device: str = "cuda",
     k: Optional[int] = None,
     use_qr: bool = True,
-    extra_words: Optional[List[str]] = None
+    extra_words: Optional[List[str]] = None,
+    style_words: Optional[List[str]] = None,
 ) -> torch.Tensor:
     """
     构建文本锚定的风格子空间 E_s ∈ R^{d×k}
@@ -47,7 +49,11 @@ def build_style_subspace(
         E_s : torch.Tensor [d, k]
     """
     tfeat = build_style_embeddings(
-        clip_model, device=device, k=k, extra_words=extra_words
+        clip_model,
+        device=device,
+        k=k,
+        extra_words=extra_words,
+        style_words=style_words,
     )                                                # [k, d]
 
     # 转置成 [d, k]

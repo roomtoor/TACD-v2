@@ -10,20 +10,20 @@ from .datasets import (
     # -------- Office-Home --------
     OfficeHomeDataset,
     OfficeHomeMultiView,
-    scan_officehome_classes,
+    scan_officehome_source_classes,
     officehome_prompt_names,
     officehome_domain_id,
 
     # -------- TerraIncognita --------
     TerraIncognitaDataset,
     TerraIncognitaMultiView,
-    scan_terraincognita_classes,
+    scan_terraincognita_source_classes,
     terraincognita_domain_id,
 
     # -------- DomainNet --------
     DomainNetDataset,
     DomainNetMultiView,
-    scan_domainnet_classes,
+    scan_domainnet_source_classes,
     domainnet_prompt_names,
     domainnet_domain_id,
     normalize_domainnet_domain,
@@ -31,7 +31,7 @@ from .datasets import (
     # -------- VLCS --------
     VLCSDataset,
     VLCSMultiView,
-    scan_vlcs_classes,
+    scan_vlcs_source_classes,
     vlcs_prompt_names,
     vlcs_domain_id,
     normalize_vlcs_domain,
@@ -46,20 +46,20 @@ __all__ = [
     # Office-Home
     "OfficeHomeDataset",
     "OfficeHomeMultiView",
-    "scan_officehome_classes",
+    "scan_officehome_source_classes",
     "officehome_prompt_names",
     "officehome_domain_id",
 
     # TerraIncognita
     "TerraIncognitaDataset",
     "TerraIncognitaMultiView",
-    "scan_terraincognita_classes",
+    "scan_terraincognita_source_classes",
     "terraincognita_domain_id",
 
     # DomainNet
     "DomainNetDataset",
     "DomainNetMultiView",
-    "scan_domainnet_classes",
+    "scan_domainnet_source_classes",
     "domainnet_prompt_names",
     "domainnet_domain_id",
     "normalize_domainnet_domain",
@@ -67,7 +67,7 @@ __all__ = [
     # VLCS
     "VLCSDataset",
     "VLCSMultiView",
-    "scan_vlcs_classes",
+    "scan_vlcs_source_classes",
     "vlcs_prompt_names",
     "vlcs_domain_id",
     "normalize_vlcs_domain",

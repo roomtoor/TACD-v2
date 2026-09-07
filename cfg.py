@@ -22,17 +22,14 @@ class TrainConfig:
     batch_size: int = 4
     num_workers: int = 8
     source_domains: List[str] = field(default_factory=lambda: ["Art"])
-    target_domains: List[str] = field(default_factory=lambda: ["Real World", "Clipart", "Product"])
-    num_classes: int = 0
-    shuffle: bool = True
 
 
     # ====== 模型结构 ======
     clip_backbone: str = "ViT-B/16"
-    freeze_clip: bool = True
-    projector_dim: int = 512                        # 语义空间维度
-    use_lora: bool = False                          
-    text_anchor_topk: Optional[int] = 29            # 默认使用论文中的完整 Mixed-29 风格词库
+    projector_mlp: bool = False
+    init_temperature: float = 0.07
+    learnable_tau: bool = True
+    text_anchor_topk: Optional[int] = 29            # complete 29-descriptor style bank
 
     # ====== 损失系数 ======
     lambda_cls: float = 1.0     # 主分类
@@ -46,18 +43,14 @@ class TrainConfig:
     lr: float = 8e-5
     weight_decay: float = 1e-4
     epochs: int = 30
-    warmup_epochs: int = 2
     grad_clip: float = 1.0
-    use_amp: bool = True   # 混合精度
 
     # ====== 随机性控制 ======
     seed: int = 3
     deterministic: bool = True
 
     # ====== 日志与保存 ======
-    save_interval: int = 1
     print_interval: int = 50
-    eval_interval: int = 1
 
     def as_dict(self) -> Dict:
         return asdict(self)
@@ -86,5 +79,5 @@ def get_cfg(overrides: Optional[Dict] = None) -> TrainConfig:
 #  Example usage
 # ---------------------------------------------------------------------
 if __name__ == "__main__":
-    cfg = get_cfg({"epochs": 10, "source_domains": ["Art", "Product", "Real World"]})
+    cfg = get_cfg({"epochs": 10, "source_domains": ["Art"]})
     print(cfg)

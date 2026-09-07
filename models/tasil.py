@@ -1,8 +1,7 @@
-# models/tacd_v2.py
+# models/tasil.py
 from __future__ import annotations
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from typing import Optional, Dict
 
 from .clip_backbone import CLIPBackbone
@@ -58,7 +57,7 @@ class TASIL(nn.Module):
         self.register_buffer("Q", torch.empty(D, 0))      # [D, r], r 可能小于 K
         self.register_buffer("T", torch.empty(0, D))      # [C, D]
         # 每一行对应一个具体风格描述符；仅训练时构造 appearance view。
-        # 不写入 checkpoint，避免破坏旧权重的加载兼容性。
+        # Reconstructed from checkpoint metadata rather than stored in state_dict.
         self.register_buffer("style_embeddings", torch.empty(0, D), persistent=False)
 
         # 支持构造时注入
@@ -66,6 +65,12 @@ class TASIL(nn.Module):
             self.set_style_subspace(E_s)
         if T is not None:
             self.set_class_texts(T)
+
+    def train(self, mode: bool = True):
+        """Keep the frozen CLIP encoder in evaluation mode during head training."""
+        super().train(mode)
+        self.backbone.model.eval()
+        return self
 
     # --------- 公共方法：控制 alpha ----------
     @torch.no_grad()
@@ -155,7 +160,7 @@ class TASIL(nn.Module):
         style_indices: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """
-        构造论文中的 appearance view：
+        Construct the appearance view:
           v_ap = Norm(Norm(CLIP_image(x)) + e_j), j ~ Uniform({1,...,K})
         随后进入与其他视图完全共享的 projection 和 style suppression。
         """

@@ -1,7 +1,8 @@
-# run_train.py  (SSDG: Single-Source -> Multi-Target)  — OfficeHome & TerraIncognita
+# Training entry point for strict single-source domain generalization.
 from __future__ import annotations
 import os
 import argparse
+import math
 import torch
 
 from cfg import get_cfg
@@ -12,7 +13,12 @@ from data import (
     normalize_vlcs_domain,
 )
 from models import TASIL
-from textspace import build_style_embeddings, build_class_texts
+from textspace import (
+    STYLE_BANKS,
+    build_style_embeddings,
+    build_class_texts,
+    get_style_bank,
+)
 from losses import GroupDRO
 
 from train_utils import (
@@ -73,15 +79,37 @@ def main():
                         help="single source domain (OfficeHome: Art/Clipart/Product/Real World; "
                              "TerraIncognita: location_38/43/46/100; "
                              "DomainNet: clip/info/paint/quick/real/sketch; VLCS: C/L/S/V)")
-    parser.add_argument("--targets", type=str, nargs="*", default=None,
-                        help="optional custom target domains (exclude source). if None, use the other domains")
-
     # Debug / overrides
     parser.add_argument("--nan_guard", action="store_true", help="Enable NaN detection guards")
-    parser.add_argument("--alpha", type=float, default=None, help="override cfg.alpha_style_remove")
+    parser.add_argument(
+        "--alpha",
+        type=float,
+        default=None,
+        help="override the raw alpha logit (effective coefficient = sigmoid(alpha))",
+    )
+    parser.add_argument(
+        "--fixed-alpha-eff",
+        type=float,
+        default=None,
+        help="freeze the effective suppression coefficient in (0,1); e.g. 0.5",
+    )
+    parser.add_argument(
+        "--appearance-bank",
+        choices=sorted(STYLE_BANKS),
+        default="default-29",
+        help="descriptor bank used to construct the appearance view",
+    )
+    parser.add_argument(
+        "--suppression-bank",
+        choices=sorted(STYLE_BANKS),
+        default=None,
+        help="descriptor bank whose QR span is suppressed; defaults to appearance bank",
+    )
     parser.add_argument("--seed", type=int, default=None, help="override cfg.seed")
 
     args = parser.parse_args()
+    if args.alpha is not None and args.fixed_alpha_eff is not None:
+        raise ValueError("Use either --alpha (raw) or --fixed-alpha-eff, not both.")
 
     dataset_name = args.dataset.lower()
     ALL_DOMAINS = get_all_domains(dataset_name)
@@ -91,20 +119,10 @@ def main():
     if source_domain not in ALL_DOMAINS:
         raise ValueError(f"--source={args.source} not in domains of {dataset_name}: {ALL_DOMAINS}")
 
-    # Build targets
-    if args.targets is None:
-        target_domains = [d for d in ALL_DOMAINS if d != source_domain]
-    else:
-        normalized_targets = [normalize_domain_arg(dataset_name, d) for d in args.targets]
-        target_domains = [d for d in normalized_targets if d in ALL_DOMAINS and d != source_domain]
-        if len(target_domains) == 0:
-            raise ValueError("`--targets` 不能为空且不能包含源域。")
-
     # ---- override cfg from CLI ----
     cfg_over = {
         "dataset_name": dataset_name,       # train_utils uses this to switch datasets
         "source_domains": [source_domain],  # SSDG: single source
-        "target_domains": target_domains,   # multi-target
     }
     if args.root:
         cfg_over["dataset_root"] = args.root
@@ -112,18 +130,34 @@ def main():
         cfg_over["epochs"] = args.epochs
     if args.alpha is not None:
         cfg_over["alpha_style_remove"] = args.alpha
+    if args.fixed_alpha_eff is not None:
+        if not 0.0 < args.fixed_alpha_eff < 1.0:
+            raise ValueError("--fixed-alpha-eff must be strictly between 0 and 1.")
+        cfg_over["alpha_style_remove"] = math.log(
+            args.fixed_alpha_eff / (1.0 - args.fixed_alpha_eff)
+        )
     if args.seed is not None:
         cfg_over["seed"] = args.seed
 
     cfg = get_cfg(cfg_over)
 
-    # dataset-specific num_classes safety (avoid OfficeHome defaults leaking into Terra)
-    if getattr(cfg, "dataset_name", "officehome") == "terraincognita":
-        cfg.num_classes = int(getattr(cfg, "num_classes", 10) or 10)
-
     # Unique experiment tag
     src_tag = source_domain.replace(" ", "_")
+    suppression_bank_id = args.suppression_bank or args.appearance_bank
     exp_name_tagged = f"{cfg.exp_name}_SSDG_{dataset_name}_{src_tag}_seed{cfg.seed}"
+    if (
+        args.appearance_bank != "default-29"
+        or suppression_bank_id != "default-29"
+        or args.fixed_alpha_eff is not None
+    ):
+        exp_name_tagged += (
+            f"_app-{args.appearance_bank}_sup-{suppression_bank_id}"
+            + (
+                f"_alphaeff-{args.fixed_alpha_eff:g}"
+                if args.fixed_alpha_eff is not None
+                else ""
+            )
+        )
 
     os.makedirs(cfg.ckpt_dir, exist_ok=True)
     os.makedirs(cfg.log_dir, exist_ok=True)
@@ -132,41 +166,55 @@ def main():
     set_seed(cfg.seed, cfg.deterministic)
     logger = Logger(cfg.log_dir, exp_name_tagged)
     logger.write(f"[Dataset] {dataset_name} | root={cfg.dataset_root}")
-    logger.write(
-        f"[Split] source={source_domain} | held-out targets={target_domains} "
-        f"(not loaded during training)"
-    )
+    logger.write(f"[Split] source={source_domain} | strict source-only training")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # --------- Data (single-source training only) ---------
     train_loader, class_dirnames = make_train_loader(cfg)
-    cfg.num_classes = len(class_dirnames)
     class_prompt_names = to_prompt_names(dataset_name, class_dirnames)
+    logger.write(
+        f"[Classes] discovered from source only | count={len(class_dirnames)} | "
+        f"names={class_dirnames}"
+    )
 
     # --------- Model ---------
     model = TASIL(
         clip_name=cfg.clip_backbone, device=device,
-        projector_mlp=getattr(cfg, "projector_mlp", False),
+        projector_mlp=cfg.projector_mlp,
         alpha=getattr(cfg, "alpha_style_remove", 0.7),
-        temperature=getattr(cfg, "init_temperature", 0.07),
-        learnable_tau=getattr(cfg, "learnable_tau", True)
+        temperature=cfg.init_temperature,
+        learnable_tau=cfg.learnable_tau,
     ).to(device)
 
     # --------- Text spaces (built once) ---------
-    style_embeddings = build_style_embeddings(
-        model.backbone.model, device=device,
-        k=getattr(cfg, "text_anchor_topk", 8),
+    appearance_words = get_style_bank(args.appearance_bank)
+    suppression_words = get_style_bank(suppression_bank_id)
+    appearance_embeddings = build_style_embeddings(
+        model.backbone.model,
+        device=device,
+        style_words=appearance_words,
     )
-    E_s = style_embeddings.transpose(0, 1).contiguous()
+    suppression_embeddings = build_style_embeddings(
+        model.backbone.model,
+        device=device,
+        style_words=suppression_words,
+    )
+    E_s = suppression_embeddings.transpose(0, 1).contiguous()
     T = build_class_texts(model.backbone.model, class_prompt_names, device=device)
-    model.set_style_embeddings(style_embeddings)
+    model.set_style_embeddings(appearance_embeddings)
     model.set_style_subspace(E_s)
     model.set_class_texts(T)
     logger.write(
-        f"[Appearance] feature-space augmentation enabled | "
-        f"num_style_descriptors={style_embeddings.size(0)}"
+        f"[Banks] appearance={args.appearance_bank} ({len(appearance_words)}) | "
+        f"suppression={suppression_bank_id} ({len(suppression_words)})"
     )
+    logger.write(f"[Banks] appearance descriptors={appearance_words}")
+    logger.write(f"[Banks] suppression descriptors={suppression_words}")
+
+    if args.fixed_alpha_eff is not None:
+        model.alpha.requires_grad_(False)
+        logger.write(f"[Alpha] frozen effective coefficient={args.fixed_alpha_eff}")
 
     a_raw = float(getattr(cfg, "alpha_style_remove", 0.0))
     logger.write(f"[Alpha] cfg.alpha_style_remove(raw) = {a_raw}")
@@ -178,10 +226,9 @@ def main():
         pass
 
     # --------- Optimizer / DRO ---------
-    opt_groups = [
-        {"params": model.projector.parameters(), "lr": cfg.lr},
-        {"params": [model.alpha], "lr": cfg.lr},
-    ]
+    opt_groups = [{"params": model.projector.parameters(), "lr": cfg.lr}]
+    if model.alpha.requires_grad:
+        opt_groups.append({"params": [model.alpha], "lr": cfg.lr})
     cls_params = [p for p in model.classifier.parameters() if p.requires_grad]
     if len(cls_params) > 0:
         opt_groups.append({"params": cls_params, "lr": cfg.lr})
@@ -192,7 +239,7 @@ def main():
     dro = GroupDRO(num_groups=2, eta=0.02, device=device)
 
     # --------- Preflight NaN check ---------
-    if args.nan_guard or getattr(cfg, "nan_guard", False):
+    if args.nan_guard:
         model.eval()
         with torch.no_grad():
             batch0 = next(iter(train_loader))
@@ -219,34 +266,43 @@ def main():
             raise SystemExit("Preflight failed: some tensors are non-finite. Check E_s/T/alpha/tau.")
         model.train()
 
-    # --------- alpha warmup (optional) ---------
-    alpha_warmup_epochs = int(getattr(cfg, "alpha_warmup_epochs", 0))
-    alpha_target = float(getattr(cfg, "alpha_style_remove", 0.7))
-
     for epoch in range(1, cfg.epochs + 1):
         lr_now = cosine_lr_schedule(optimizer, cfg.lr, epoch - 1, cfg.epochs)
         logger.write(f"[LR] epoch {epoch} lr={lr_now:.6f}")
 
-        if alpha_warmup_epochs > 0:
-            if epoch <= alpha_warmup_epochs:
-                model.set_alpha(0.0)
-            else:
-                t = (epoch - alpha_warmup_epochs) / max(1, (cfg.epochs - alpha_warmup_epochs))
-                model.set_alpha(alpha_target * max(0.0, min(1.0, t)))
-
         train_one_epoch(
             model, train_loader, optimizer, dro, cfg, device, epoch, logger,
-            nan_guard=(args.nan_guard or getattr(cfg, "nan_guard", False))
+            nan_guard=args.nan_guard,
         )
 
     # The checkpoint rule is fixed in advance: use the final training epoch.
     # Held-out target domains are evaluated separately by evaluate.py.
-    save_checkpoint(model, optimizer, cfg.epochs, cfg.ckpt_dir, exp_name_tagged)
+    checkpoint_metadata = {
+        "dataset_name": dataset_name,
+        "source_domain": source_domain,
+        "class_names": list(class_dirnames),
+        "seed": int(cfg.seed),
+        "clip_backbone": cfg.clip_backbone,
+        "appearance_bank": args.appearance_bank,
+        "suppression_bank": suppression_bank_id,
+        "appearance_descriptors": appearance_words,
+        "suppression_descriptors": suppression_words,
+        "fixed_alpha_eff": args.fixed_alpha_eff,
+        "checkpoint_rule": "fixed_final_epoch",
+    }
+    save_checkpoint(
+        model,
+        optimizer,
+        cfg.epochs,
+        cfg.ckpt_dir,
+        exp_name_tagged,
+        metadata=checkpoint_metadata,
+    )
     logger.write(f"[CKPT] saved fixed final-epoch checkpoint: epoch={cfg.epochs}")
 
     logger.write(
         f"=== SSDG Training finished. dataset={dataset_name} source={source_domain} | "
-        f"fixed checkpoint epoch={cfg.epochs}; no target-domain evaluation during training ==="
+        f"fixed checkpoint epoch={cfg.epochs}; no target-domain access during training ==="
     )
 
 if __name__ == "__main__":

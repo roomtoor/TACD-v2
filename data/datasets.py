@@ -19,6 +19,16 @@ from .augment import (
 
 _IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
+
+def _scan_class_dirs(domain_dir: Path, dataset_name: str) -> List[str]:
+    """Return the sorted class folders from one explicitly selected domain."""
+    if not domain_dir.is_dir():
+        raise FileNotFoundError(f"[{dataset_name}] 域目录不存在: {domain_dir}")
+    classes = sorted(p.name for p in domain_dir.iterdir() if p.is_dir())
+    if not classes:
+        raise RuntimeError(f"[{dataset_name}] {domain_dir} 下未找到类别子目录")
+    return classes
+
 # ============================================================
 # Office-Home
 # ============================================================
@@ -38,21 +48,11 @@ def _norm_domain(domain: str) -> str:
     return _OFFICEHOME_DOMAIN_ALIASES.get(d_key, _OFFICEHOME_DOMAIN_ALIASES.get(d, d))
 
 
-def scan_officehome_classes(root: Union[str, Path]) -> List[str]:
-    """扫描四域的类名交集；按字母序返回，保证全域同一 label 映射。"""
-    root = Path(root).expanduser().resolve()
-    domains = ["Art", "Clipart", "Product", "Real World"]
-    sets = []
-    for d in domains:
-        dom_dir = root / d
-        if not dom_dir.is_dir():
-            raise FileNotFoundError(f"[OfficeHome] 目录不存在: {dom_dir}")
-        classes = {p.name for p in dom_dir.iterdir() if p.is_dir()}
-        if not classes:
-            raise RuntimeError(f"[OfficeHome] {dom_dir} 下未找到类别子目录")
-        sets.append(classes)
-    common = set.intersection(*sets)
-    return sorted(common)
+def scan_officehome_source_classes(root: Union[str, Path], domain: str) -> List[str]:
+    """Build the label space from the selected Office-Home source only."""
+    root_path = Path(root).expanduser().resolve()
+    source_domain = _norm_domain(domain)
+    return _scan_class_dirs(root_path / source_domain, "OfficeHome")
 
 
 def officehome_prompt_names(class_names: List[str]) -> List[str]:
@@ -99,11 +99,18 @@ class OfficeHomeDataset(Dataset):
             raise FileNotFoundError(f"[OfficeHome] 域目录不存在: {dom_dir}")
 
         if class_names is None:
-            self.class_names = scan_officehome_classes(self.root)
+            self.class_names = scan_officehome_source_classes(self.root, self.domain)
         else:
             self.class_names = sorted(class_names)
 
         self.class_to_idx = {c: i for i, c in enumerate(self.class_names)}
+        observed_classes = set(_scan_class_dirs(dom_dir, "OfficeHome"))
+        unknown_classes = sorted(observed_classes - set(self.class_names))
+        if unknown_classes:
+            raise RuntimeError(
+                "[OfficeHome] 当前域包含训练类表之外的类别，拒绝静默丢弃: "
+                f"{unknown_classes}"
+            )
 
         self.samples: List[Tuple[Path, int]] = []
         for cls in self.class_names:
@@ -191,26 +198,14 @@ def terraincognita_domain_id(domain: str) -> int:
     return _TERRA_DOMAIN_TO_ID[domain]
 
 
-def scan_terraincognita_classes(root: Union[str, Path]) -> List[str]:
-    """
-    扫描四个 location 的类名交集；按字母序返回，保证全域同一 label 映射。
-    这是 SSDG / 多域评测的关键：避免不同域 label 对不上。
-    """
-    root = Path(root).expanduser().resolve()
-    sets = []
-    for d in _TERRA_DOMAINS:
-        dom_dir = root / d
-        if not dom_dir.is_dir():
-            raise FileNotFoundError(f"[TerraIncognita] 目录不存在: {dom_dir}")
-        classes = {p.name for p in dom_dir.iterdir() if p.is_dir()}
-        if not classes:
-            raise RuntimeError(f"[TerraIncognita] {dom_dir} 下未找到类别子目录")
-        sets.append(classes)
-
-    common = set.intersection(*sets)
-    if not common:
-        raise RuntimeError("[TerraIncognita] 四域类别交集为空：检查数据组织/是否某些域缺类")
-    return sorted(common)
+def scan_terraincognita_source_classes(
+    root: Union[str, Path], domain: str
+) -> List[str]:
+    """Build the label space from the selected TerraIncognita source only."""
+    if domain not in _TERRA_DOMAINS:
+        raise ValueError(f"Unknown TerraIncognita domain: {domain}")
+    root_path = Path(root).expanduser().resolve()
+    return _scan_class_dirs(root_path / domain, "TerraIncognita")
 
 
 class TerraIncognitaDataset(Dataset):
@@ -221,7 +216,7 @@ class TerraIncognitaDataset(Dataset):
       location_46/<class>/*.jpg
       location_100/<class>/*.jpg
 
-    重要：默认使用四域“类名交集”做统一 label 映射。
+    默认从当前域建立 label 映射；跨域评测时应显式传入训练阶段冻结的源域类表。
     """
     def __init__(
         self,
@@ -230,7 +225,7 @@ class TerraIncognitaDataset(Dataset):
         transform=None,
         return_pil: bool = False,
         recursive: bool = True,
-        class_names: Optional[List[str]] = None,  # NEW: 允许外部传入统一类表
+        class_names: Optional[List[str]] = None,
     ):
         super().__init__()
         self.root = Path(root).expanduser().resolve()
@@ -243,20 +238,26 @@ class TerraIncognitaDataset(Dataset):
         if not dom_dir.is_dir():
             raise FileNotFoundError(f"[TerraIncognita] 域目录不存在: {dom_dir}")
 
-        # 统一类表：默认取四域交集，避免跨域 label 错位
+        # 未显式传入时，只扫描当前域；训练代码会冻结并保存源域类表。
         if class_names is None:
-            self.class_names = scan_terraincognita_classes(self.root)
+            self.class_names = scan_terraincognita_source_classes(self.root, self.domain)
         else:
             self.class_names = sorted(class_names)
 
         self.class_to_idx = {c: i for i, c in enumerate(self.class_names)}
+        observed_classes = set(_scan_class_dirs(dom_dir, "TerraIncognita"))
+        unknown_classes = sorted(observed_classes - set(self.class_names))
+        if unknown_classes:
+            raise RuntimeError(
+                "[TerraIncognita] 当前域包含训练类表之外的类别，拒绝静默丢弃: "
+                f"{unknown_classes}"
+            )
 
         self.samples: List[Tuple[Path, int]] = []
         for cls in self.class_names:
             cls_dir = dom_dir / cls
             if not cls_dir.is_dir():
-                # 理论上用交集时不会缺，但这里防御一下
-                # print(f"[WARN] {self.domain} 缺少类别目录: {cls_dir}")
+                # 目标域可能缺少源域中的某个类别；该类在此域自然没有样本。
                 continue
             it = cls_dir.rglob("*") if recursive else cls_dir.iterdir()
             for p in it:
@@ -264,7 +265,7 @@ class TerraIncognitaDataset(Dataset):
                     self.samples.append((p, self.class_to_idx[cls]))
 
         if not self.samples:
-            raise RuntimeError(f"[TerraIncognita] 在 {dom_dir} 未找到任何图像（或交集类表过滤后为空）")
+            raise RuntimeError(f"[TerraIncognita] 在 {dom_dir} 未找到任何图像（或源域类表过滤后为空）")
 
     def __len__(self):
         return len(self.samples)
@@ -296,7 +297,7 @@ class TerraIncognitaMultiView(Dataset):
         img_size: int = 224,
         return_appearance: bool = True,
         recursive: bool = True,
-        class_names: Optional[List[str]] = None,  # NEW
+        class_names: Optional[List[str]] = None,
     ):
         super().__init__()
 
@@ -306,11 +307,11 @@ class TerraIncognitaMultiView(Dataset):
             transform=None,
             return_pil=True,
             recursive=recursive,
-            class_names=class_names,  # NEW
+            class_names=class_names,
         )
         self.domain_id = terraincognita_domain_id(domain)
 
-        # 复用你 data/augment.py 的 transform
+        # Reuse the shared training transforms.
         self.t_weak = get_weak_transform(img_size)
         self.t_strong = get_strong_transform(img_size)
         self.t_base = get_base_transform(img_size)
@@ -423,35 +424,30 @@ def _resolve_domain_dir(
     )
 
 
-def _scan_named_domain_classes(
+def _scan_named_source_classes(
     root: Path,
-    domains: List[str],
+    domain: str,
     folder_candidates: Dict[str, Tuple[str, ...]],
     dataset_name: str,
 ) -> List[str]:
-    """构建跨域统一标签空间；缺失类别可在个别域中没有样本。"""
-    class_union = set()
-    for domain in domains:
-        dom_dir = _resolve_domain_dir(root, domain, folder_candidates, dataset_name)
-        classes = {p.name for p in dom_dir.iterdir() if p.is_dir()}
-        if not classes:
-            raise RuntimeError(f"[{dataset_name}] {dom_dir} 下未找到类别子目录")
-        class_union.update(classes)
-    if not class_union:
-        raise RuntimeError(f"[{dataset_name}] 未找到任何类别")
-    return sorted(class_union)
+    domain_dir = _resolve_domain_dir(root, domain, folder_candidates, dataset_name)
+    return _scan_class_dirs(domain_dir, dataset_name)
 
 
-def scan_domainnet_classes(root: Union[str, Path]) -> List[str]:
+def scan_domainnet_source_classes(root: Union[str, Path], domain: str) -> List[str]:
     root_path = _select_nested_root(root, ("domain_net", "DomainNet"))
-    return _scan_named_domain_classes(
-        root_path, _DOMAINNET_DOMAINS, _DOMAINNET_FOLDERS, "DomainNet"
+    canonical_domain = normalize_domainnet_domain(domain)
+    return _scan_named_source_classes(
+        root_path, canonical_domain, _DOMAINNET_FOLDERS, "DomainNet"
     )
 
 
-def scan_vlcs_classes(root: Union[str, Path]) -> List[str]:
+def scan_vlcs_source_classes(root: Union[str, Path], domain: str) -> List[str]:
     root_path = _select_nested_root(root, ("VLCS", "vlcs"))
-    return _scan_named_domain_classes(root_path, _VLCS_DOMAINS, _VLCS_FOLDERS, "VLCS")
+    canonical_domain = normalize_vlcs_domain(domain)
+    return _scan_named_source_classes(
+        root_path, canonical_domain, _VLCS_FOLDERS, "VLCS"
+    )
 
 
 def domainnet_prompt_names(class_names: List[str]) -> List[str]:
@@ -476,7 +472,6 @@ class _NamedFolderDataset(Dataset):
         root: Union[str, Path],
         domain: str,
         *,
-        domains: List[str],
         normalize_domain,
         folder_candidates: Dict[str, Tuple[str, ...]],
         dataset_name: str,
@@ -498,12 +493,19 @@ class _NamedFolderDataset(Dataset):
         )
 
         if class_names is None:
-            self.class_names = _scan_named_domain_classes(
-                self.root, domains, folder_candidates, dataset_name
+            self.class_names = _scan_named_source_classes(
+                self.root, self.domain, folder_candidates, dataset_name
             )
         else:
             self.class_names = sorted(class_names)
         self.class_to_idx = {c: i for i, c in enumerate(self.class_names)}
+        observed_classes = set(_scan_class_dirs(self.dom_dir, dataset_name))
+        unknown_classes = sorted(observed_classes - set(self.class_names))
+        if unknown_classes:
+            raise RuntimeError(
+                f"[{dataset_name}] 当前域包含训练类表之外的类别，拒绝静默丢弃: "
+                f"{unknown_classes}"
+            )
 
         self.samples: List[Tuple[Path, int]] = []
         for cls in self.class_names:
@@ -572,7 +574,6 @@ class DomainNetDataset(_NamedFolderDataset):
     ):
         super().__init__(
             root, domain,
-            domains=_DOMAINNET_DOMAINS,
             normalize_domain=normalize_domainnet_domain,
             folder_candidates=_DOMAINNET_FOLDERS,
             dataset_name="DomainNet",
@@ -613,7 +614,6 @@ class VLCSDataset(_NamedFolderDataset):
     ):
         super().__init__(
             root, domain,
-            domains=_VLCS_DOMAINS,
             normalize_domain=normalize_vlcs_domain,
             folder_candidates=_VLCS_FOLDERS,
             dataset_name="VLCS",

@@ -4,16 +4,13 @@ from typing import Dict, List, Tuple
 import torch
 from torch.utils.data import DataLoader, ConcatDataset
 from tqdm import tqdm
-from pathlib import Path
-from utils import AverageMeter, accuracy
+from utils import AverageMeter
 
 __all__ = [
     "collate_fn_dict",
     "group_mean_losses",
     "make_train_loader",
-    "make_val_loaders",
     "train_one_epoch",
-    "evaluate",
 ]
 
 # ------------------------- helpers -------------------------
@@ -48,23 +45,28 @@ def group_mean_losses(losses: torch.Tensor, group_ids: torch.Tensor, num_groups:
 
 def make_train_loader(cfg) -> Tuple[DataLoader, List[str]]:
     """
-    拼接源域数据并提供弱/强/特征空间 appearance 多视图。
+    从唯一源域构建数据并提供弱/强/特征空间 appearance 多视图。
     支持 OfficeHome / TerraIncognita / DomainNet / VLCS。
     返回:
       - train_loader: dict batch (x_w/x_s/x_base/y/domain/path)
-      - class_names: 全域统一类名列表（用于 val / 文本模板 / num_classes 对齐）
+      - class_names: 仅从源域发现并冻结的类名列表
     """
     train_sets = []
     dataset_name = getattr(cfg, "dataset_name", "officehome").lower()
+    source_domains = list(getattr(cfg, "source_domains", []))
+    if len(source_domains) != 1:
+        raise ValueError(
+            "Strict single-source training requires exactly one source domain; "
+            f"got {source_domains}."
+        )
+    source_domain = source_domains[0]
 
     if dataset_name in ["officehome", "office-home", "oh"]:
-        # 延迟导入避免循环依赖
-        from data import OfficeHomeMultiView, scan_officehome_classes
+        from data import OfficeHomeMultiView, scan_officehome_source_classes
 
-        #  OfficeHome：四域交集，确保 label 对齐
-        class_names = scan_officehome_classes(cfg.dataset_root)
+        class_names = scan_officehome_source_classes(cfg.dataset_root, source_domain)
 
-        for d in cfg.source_domains:
+        for d in source_domains:
             train_sets.append(
                 OfficeHomeMultiView(
                     root=cfg.dataset_root,
@@ -76,12 +78,11 @@ def make_train_loader(cfg) -> Tuple[DataLoader, List[str]]:
             )
 
     elif dataset_name in ["terraincognita", "terra", "ti"]:
-        from data import TerraIncognitaMultiView, scan_terraincognita_classes
+        from data import TerraIncognitaMultiView, scan_terraincognita_source_classes
 
-        #  Terra：四域交集（source+target 都一致），防止 label space 错位
-        class_names = scan_terraincognita_classes(cfg.dataset_root)
+        class_names = scan_terraincognita_source_classes(cfg.dataset_root, source_domain)
 
-        for d in cfg.source_domains:
+        for d in source_domains:
             train_sets.append(
                 TerraIncognitaMultiView(
                     root=cfg.dataset_root,
@@ -93,10 +94,10 @@ def make_train_loader(cfg) -> Tuple[DataLoader, List[str]]:
             )
 
     elif dataset_name in ["domainnet", "domain-net", "dn"]:
-        from data import DomainNetMultiView, scan_domainnet_classes
+        from data import DomainNetMultiView, scan_domainnet_source_classes
 
-        class_names = scan_domainnet_classes(cfg.dataset_root)
-        for d in cfg.source_domains:
+        class_names = scan_domainnet_source_classes(cfg.dataset_root, source_domain)
+        for d in source_domains:
             train_sets.append(
                 DomainNetMultiView(
                     root=cfg.dataset_root,
@@ -108,10 +109,10 @@ def make_train_loader(cfg) -> Tuple[DataLoader, List[str]]:
             )
 
     elif dataset_name in ["vlcs"]:
-        from data import VLCSMultiView, scan_vlcs_classes
+        from data import VLCSMultiView, scan_vlcs_source_classes
 
-        class_names = scan_vlcs_classes(cfg.dataset_root)
-        for d in cfg.source_domains:
+        class_names = scan_vlcs_source_classes(cfg.dataset_root, source_domain)
+        for d in source_domains:
             train_sets.append(
                 VLCSMultiView(
                     root=cfg.dataset_root,
@@ -142,104 +143,7 @@ def make_train_loader(cfg) -> Tuple[DataLoader, List[str]]:
     return loader, class_names
 
 
-def make_val_loaders(cfg, class_names: List[str]) -> Dict[str, DataLoader]:
-    """
-    每个目标域一个验证 loader（弱增广/单视图）。
-    返回 dict: domain -> loader
-    batch 形式为 (x, y)（如果你的 evaluate() 期望 dict，可把下面的 ds 也改成返回 dict）。
-    """
-    loaders: Dict[str, DataLoader] = {}
-    dataset_name = getattr(cfg, "dataset_name", "officehome").lower()
-
-    from data import get_weak_transform
-    t_weak = get_weak_transform(cfg.img_size)
-
-    if dataset_name in ["officehome", "office-home", "oh"]:
-        from data import OfficeHomeDataset
-
-        for d in cfg.target_domains:
-            ds = OfficeHomeDataset(
-                root=cfg.dataset_root,
-                domain=d,
-                transform=t_weak,          #  直接用弱增广（输出 tensor）
-                class_names=class_names,   #  统一 label space
-                return_pil=False,
-            )
-            loaders[d] = DataLoader(
-                ds,
-                batch_size=cfg.batch_size,
-                shuffle=False,
-                num_workers=cfg.num_workers,
-                pin_memory=True,
-            )
-        return loaders
-
-    elif dataset_name in ["terraincognita", "terra", "ti"]:
-        from data import TerraIncognitaDataset
-
-        for d in cfg.target_domains:
-            ds = TerraIncognitaDataset(
-                root=cfg.dataset_root,
-                domain=d,
-                transform=t_weak,          #  直接用弱增广（输出 tensor）
-                class_names=class_names,   #  统一 label space
-                return_pil=False,
-            )
-            loaders[d] = DataLoader(
-                ds,
-                batch_size=cfg.batch_size,
-                shuffle=False,
-                num_workers=cfg.num_workers,
-                pin_memory=True,
-            )
-        return loaders
-
-    elif dataset_name in ["domainnet", "domain-net", "dn"]:
-        from data import DomainNetDataset
-
-        for d in cfg.target_domains:
-            ds = DomainNetDataset(
-                root=cfg.dataset_root,
-                domain=d,
-                transform=t_weak,
-                class_names=class_names,
-                return_pil=False,
-            )
-            loaders[d] = DataLoader(
-                ds,
-                batch_size=cfg.batch_size,
-                shuffle=False,
-                num_workers=cfg.num_workers,
-                pin_memory=True,
-            )
-        return loaders
-
-    elif dataset_name in ["vlcs"]:
-        from data import VLCSDataset
-
-        for d in cfg.target_domains:
-            ds = VLCSDataset(
-                root=cfg.dataset_root,
-                domain=d,
-                transform=t_weak,
-                class_names=class_names,
-                return_pil=False,
-            )
-            loaders[d] = DataLoader(
-                ds,
-                batch_size=cfg.batch_size,
-                shuffle=False,
-                num_workers=cfg.num_workers,
-                pin_memory=True,
-            )
-        return loaders
-
-    else:
-        raise ValueError(f"Unknown cfg.dataset_name={dataset_name}")
-
-
-
-# ------------------------- train & eval -------------------------
+# ------------------------- training -------------------------
 def _check_finite(t: torch.Tensor, name: str):
     if not torch.isfinite(t).all():
         bad = t[~torch.isfinite(t)]
@@ -299,7 +203,7 @@ def train_one_epoch(
         if nan_guard:
             _check_finite(logits_ap, "logits_ap")
 
-        # GroupDRO 的两个组与论文一致：弱视图和 appearance 视图。
+        # GroupDRO uses the weak and appearance views as its two groups.
         # update() 只使用 detach 后的数值更新 q；forward() 必须接收未 detach
         # 的损失，才能让加权组损失对模型参数产生梯度。
         loss_ap = cosine_ce(logits_ap, y)
@@ -337,45 +241,3 @@ def train_one_epoch(
         f"appearance={ap_meter.avg:.4f} | dro={dro_meter.avg:.4f} | "
         f"q={dro.q.detach().cpu().tolist()}"
     )
-
-
-@torch.no_grad()
-def evaluate(model, val_loaders: Dict[str, DataLoader], device, epoch, logger):
-    model.eval()
-    results = {}
-
-    for domain, loader in val_loaders.items():
-        top1_meter = AverageMeter(f"acc@1_{domain}")
-
-        for batch in loader:
-            # 兼容 (x, y) 或 (x, y, path)
-            if isinstance(batch, (list, tuple)):
-                if len(batch) == 2:
-                    x, y = batch
-                elif len(batch) >= 3:
-                    x, y = batch[0], batch[1]
-                else:
-                    raise RuntimeError(f"[evaluate] Unexpected batch tuple length={len(batch)}")
-            else:
-                # 如果你未来把 val 也做成 dict，这里也能兼容
-                # 约定 key: 'x' 或 'x_w'
-                if "x" in batch:
-                    x, y = batch["x"], batch["y"]
-                elif "x_w" in batch:
-                    x, y = batch["x_w"], batch["y"]
-                else:
-                    raise RuntimeError(f"[evaluate] Unexpected batch type/keys: {type(batch)} {getattr(batch,'keys',lambda:[])()}")
-
-            x = x.to(device, non_blocking=True)
-            y = y.to(device, non_blocking=True)
-
-            logits = model(x)
-            acc1 = accuracy(logits, y, topk=(1,))[0].item()
-            top1_meter.update(acc1, y.size(0))
-
-        results[domain] = top1_meter.avg
-        logger.write(f"[Val][{epoch}] {domain}: acc@1={top1_meter.avg:.2f}")
-
-    mean_acc = sum(results.values()) / max(len(results), 1)
-    logger.write(f"[Val][{epoch}] Mean acc@1={mean_acc:.2f}")
-    return results, mean_acc

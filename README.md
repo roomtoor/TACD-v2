@@ -2,6 +2,8 @@
 
 Official research implementation of **Text-Anchored Style Invariance Learning for Single-Source Domain Generalization**.
 
+**Code:** https://github.com/roomtoor/TASIL
+
 TASIL constructs a style subspace from textual style descriptors encoded by a frozen CLIP model, suppresses style-aligned components in visual representations, and trains with weak, strong, and text-guided appearance feature views. The implementation follows a strict single-source domain generalization (SDG) protocol: only one labeled source domain is used for training, and held-out target domains are used only for final evaluation.
 
 ## Release scope
@@ -49,7 +51,7 @@ TerraIncognitaDataset/
     └── location_100/<class_name>/*
 ```
 
-The loaders form one consistent label mapping across all domains. Directory names, spaces, and capitalization must match the structures above.
+The source-domain class mapping is stored in each checkpoint and reused unchanged for held-out evaluation. Directory names, spaces, and capitalization must match the structures above.
 
 ### DomainNet
 
@@ -85,7 +87,7 @@ The canonical domain identifiers are `C`, `L`, `S`, and `V`; the loader also rec
 
 ## Training
 
-The paper reports three runs with seeds `3`, `5201314`, and `30319`. Training uses one source domain for 30 epochs and saves the fixed final-epoch checkpoint. Target-domain samples are not loaded during training or model selection.
+The paper reports three runs with seeds `3`, `5201314`, and `30319`. Training uses one source domain for 30 epochs and saves the fixed final-epoch checkpoint. The class mapping is discovered from that source only and is stored in checkpoint metadata; target-domain directories are not inspected or loaded during training or model selection.
 
 Office-Home example:
 
@@ -137,6 +139,34 @@ python run_train.py \
 
 Repeat each experiment for every source domain and each reported seed. Office-Home, TerraIncognita, and VLCS have four source choices; DomainNet has six. Checkpoints are written to `checkpoints/`; logs are written to `logs/`.
 
+### Shared-prior control
+
+The paper's AA/AB/BA/BB analysis uses two disjoint, matched 12-descriptor banks. It fixes the effective suppression coefficient at 0.5 so bank pairing is the only changed factor. The default `default-29` main configuration remains unchanged.
+
+```bash
+# AA: shared bank A
+python run_train.py --dataset officehome --root ./OfficeHomeDataset --source Art \
+  --seed 3 --appearance-bank mixed-12 --suppression-bank mixed-12 \
+  --fixed-alpha-eff 0.5
+
+# AB: appearance A, suppression B
+python run_train.py --dataset officehome --root ./OfficeHomeDataset --source Art \
+  --seed 3 --appearance-bank mixed-12 --suppression-bank alt-mixed-12 \
+  --fixed-alpha-eff 0.5
+
+# BA: appearance B, suppression A
+python run_train.py --dataset officehome --root ./OfficeHomeDataset --source Art \
+  --seed 3 --appearance-bank alt-mixed-12 --suppression-bank mixed-12 \
+  --fixed-alpha-eff 0.5
+
+# BB: shared bank B
+python run_train.py --dataset officehome --root ./OfficeHomeDataset --source Art \
+  --seed 3 --appearance-bank alt-mixed-12 --suppression-bank alt-mixed-12 \
+  --fixed-alpha-eff 0.5
+```
+
+To reproduce Table 4, run all four settings on Office-Home and TerraIncognita, alternating every domain as source and using seeds `3`, `5201314`, and `30319`. Each checkpoint stores both complete descriptor lists.
+
 ## Evaluation
 
 Evaluate one checkpoint on every held-out domain:
@@ -187,6 +217,15 @@ The paper reports top-1 accuracy (%) as mean $\pm$ standard deviation over seeds
 |---|---:|---:|---:|---:|---:|
 | TASIL | 83.56 $\pm$ 0.33 | 38.06 $\pm$ 0.71 | 62.08 $\pm$ 0.53 | 82.81 $\pm$ 0.45 | 66.63 |
 
+The matched textual-prior control reported in Table 4 is:
+
+| Setting | Appearance prior | Suppression prior | Office-Home | TerraIncognita |
+|---|:---:|:---:|---:|---:|
+| AA (shared) | A | A | 83.36 $\pm$ 0.53 | 37.68 $\pm$ 0.85 |
+| AB (unshared) | A | B | 82.91 $\pm$ 0.55 | 37.12 $\pm$ 0.89 |
+| BA (unshared) | B | A | 82.85 $\pm$ 0.61 | 37.06 $\pm$ 1.01 |
+| BB (shared) | B | B | 83.33 $\pm$ 0.59 | 37.54 $\pm$ 0.96 |
+
 For additional reproducibility detail, the source-conditioned means for the two benchmarks used in the paper's controlled analyses are shown below. Each source column is the mean over the other three held-out domains, averaged over the same three seeds.
 
 | Dataset | Source 1 | Source 2 | Source 3 | Source 4 | Average |
@@ -215,9 +254,11 @@ For additional reproducibility detail, the source-conditioned means for the two 
 - The CLIP image and text encoders remain frozen.
 - The default backbone is CLIP ViT-B/16.
 - The default style bank contains 29 fixed textual descriptors shared by appearance-view construction and style-subspace suppression.
+- The training label mapping is derived from the selected source domain only and frozen in checkpoint metadata for evaluation.
 - Training uses AdamW for 30 epochs with batch size 4, learning rate `8e-5`, weight decay `1e-4`, $\lambda_{\mathrm{cls}}=1$, $\lambda_{\mathrm{cons}}=\lambda_{\mathrm{group}}=0.3$, and GroupDRO step size $\eta=0.02$.
 - The effective style-suppression coefficient is `sigmoid(alpha)`; the learnable raw parameter starts at `alpha = 0`, corresponding to an initial effective value of `0.5`.
 - The final training epoch is selected in advance; target-domain accuracy is not used for checkpoint selection.
+- Evaluation requires an explicit checkpoint path and never auto-selects a file by modification time.
 - Evaluation is deterministic and does not update the model.
 - Exact reproducibility can still depend on GPU hardware, CUDA, cuDNN, and third-party library behavior.
 
